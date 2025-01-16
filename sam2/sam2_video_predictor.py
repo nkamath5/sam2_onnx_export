@@ -41,20 +41,23 @@ class SAM2VideoPredictor(SAM2Base):
     @torch.inference_mode()
     def init_state(
         self,
-        video_path,
+        images,
+        video_height=680,
+        video_width=560,
+        # video_path,
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
         async_loading_frames=False,
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
-        images, video_height, video_width = load_video_frames(
-            video_path=video_path,
-            image_size=self.image_size,
-            offload_video_to_cpu=offload_video_to_cpu,
-            async_loading_frames=async_loading_frames,
-            compute_device=compute_device,
-        )
+        # images, video_height, video_width = load_video_frames(
+        #     video_path=video_path,
+        #     image_size=self.image_size,
+        #     offload_video_to_cpu=offload_video_to_cpu,
+        #     async_loading_frames=async_loading_frames,
+        #     compute_device=compute_device,
+        # )
         inference_state = {}
         inference_state["images"] = images
         inference_state["num_frames"] = len(images)
@@ -290,7 +293,7 @@ class SAM2VideoPredictor(SAM2Base):
         _, video_res_masks = self._get_orig_video_res_output(
             inference_state, consolidated_out["pred_masks_video_res"]
         )
-        return frame_idx, obj_ids, video_res_masks
+        return inference_state, frame_idx, obj_ids, video_res_masks
 
     def add_new_points(self, *args, **kwargs):
         """Deprecated method. Please use `add_new_points_or_box` instead."""
@@ -476,7 +479,7 @@ class SAM2VideoPredictor(SAM2Base):
 
         return consolidated_out
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def propagate_in_video_preflight(self, inference_state):
         """Prepare inference_state and consolidate temporary outputs before tracking."""
         # Check and make sure that every object has received input points or masks.
@@ -542,7 +545,7 @@ class SAM2VideoPredictor(SAM2Base):
             for frame_idx in obj_output_dict["cond_frame_outputs"]:
                 obj_output_dict["non_cond_frame_outputs"].pop(frame_idx, None)
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def propagate_in_video(
         self,
         inference_state,
@@ -580,7 +583,7 @@ class SAM2VideoPredictor(SAM2Base):
             )
             processing_order = range(start_frame_idx, end_frame_idx + 1)
 
-        for frame_idx in tqdm(processing_order, desc="propagate in video"):
+        for frame_idx in (processing_order): #tqdm(processing_order, desc="propagate in video"):
             pred_masks_per_obj = [None] * batch_size
             for obj_idx in range(batch_size):
                 obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
@@ -627,7 +630,8 @@ class SAM2VideoPredictor(SAM2Base):
             _, video_res_masks = self._get_orig_video_res_output(
                 inference_state, all_pred_masks
             )
-            yield frame_idx, obj_ids, video_res_masks
+            #yield frame_idx, obj_ids, video_res_masks
+            return frame_idx, obj_ids, video_res_masks
 
     @torch.inference_mode()
     def clear_all_prompts_in_frame(
@@ -704,30 +708,35 @@ class SAM2VideoPredictor(SAM2Base):
     def _get_image_feature(self, inference_state, frame_idx, batch_size):
         """Compute the image features on a given frame."""
         # Look up in the cache first
-        image, backbone_out = inference_state["cached_features"].get(
+        image_, backbone_out = inference_state["cached_features"].get(
             frame_idx, (None, None)
         )
         if backbone_out is None:
             # Cache miss -- we will run inference on a single image
             device = inference_state["device"]
-            image = inference_state["images"][frame_idx].to(device).float().unsqueeze(0)
+            # with torch.inference_mode(False):
+            image = inference_state["images"].clone()[frame_idx].to(device).float().unsqueeze(0)
+            # image_t = inference_state["images"][frame_idx]
+            # image = torch.clone(image_t).to(device).float().unsqueeze(0)
             backbone_out = self.forward_image(image)
             # Cache the most recent frame's feature (for repeated interactions with
             # a frame; we can use an LRU cache for more frames in the future).
             inference_state["cached_features"] = {frame_idx: (image, backbone_out)}
+        else:
+            image = image_ # we probably dont need this separation since this wasn't the cause of version counter error
 
         # expand the features to have the same dimension as the number of objects
-        expanded_image = image.expand(batch_size, -1, -1, -1)
+        expanded_image = image #.expand(batch_size, -1, -1, -1) # batch_size is 1 so dont need expand
         expanded_backbone_out = {
             "backbone_fpn": backbone_out["backbone_fpn"].copy(),
             "vision_pos_enc": backbone_out["vision_pos_enc"].copy(),
         }
         for i, feat in enumerate(expanded_backbone_out["backbone_fpn"]):
-            expanded_backbone_out["backbone_fpn"][i] = feat.expand(
-                batch_size, -1, -1, -1
-            )
+            expanded_backbone_out["backbone_fpn"][i] = feat #.expand(
+                #batch_size, -1, -1, -1
+            #)
         for i, pos in enumerate(expanded_backbone_out["vision_pos_enc"]):
-            pos = pos.expand(batch_size, -1, -1, -1)
+            pos = pos #.expand(batch_size, -1, -1, -1)
             expanded_backbone_out["vision_pos_enc"][i] = pos
 
         features = self._prepare_backbone_features(expanded_backbone_out)
@@ -782,10 +791,10 @@ class SAM2VideoPredictor(SAM2Base):
             maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
         pred_masks_gpu = current_out["pred_masks"]
         # potentially fill holes in the predicted masks
-        if self.fill_hole_area > 0:
-            pred_masks_gpu = fill_holes_in_mask_scores(
-                pred_masks_gpu, self.fill_hole_area
-            )
+        # if self.fill_hole_area > 0:
+        #     pred_masks_gpu = fill_holes_in_mask_scores(
+        #         pred_masks_gpu, self.fill_hole_area
+        #     )
         pred_masks = pred_masks_gpu.to(storage_device, non_blocking=True)
         # "maskmem_pos_enc" is the same across frames, so we only need to store one copy of it
         maskmem_pos_enc = self._get_maskmem_pos_enc(inference_state, current_out)

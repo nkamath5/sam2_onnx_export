@@ -171,7 +171,7 @@ class MemoryEncoder(nn.Module):
         # in case the visual features are on CPU, cast them to CUDA
         pix_feat = pix_feat.to(masks.device)
 
-        x = self.pix_feat_proj(pix_feat)
+        x = self.pix_feat_proj(pix_feat.clone())
         x = x + masks
         x = self.fuser(x)
         x = self.out_proj(x)
