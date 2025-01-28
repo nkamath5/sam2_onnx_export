@@ -33,6 +33,7 @@ def select_closest_cond_frames(frame_idx, cond_frame_outputs, max_cond_frame_num
         selected_outputs = cond_frame_outputs
         unselected_outputs = {}
     else:
+        print("Not using all possible conditioning frames :(")
         assert max_cond_frame_num >= 2, "we should allow using 2+ conditioning frames"
         selected_outputs = {}
 

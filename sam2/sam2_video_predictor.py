@@ -41,23 +41,25 @@ class SAM2VideoPredictor(SAM2Base):
     @torch.inference_mode()
     def init_state(
         self,
-        images,
+        video_path,
+        images=None,
         video_height=680,
         video_width=560,
-        # video_path,
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
-        async_loading_frames=False,
+        async_loading_frames=True, # can set to True to prevent OOM https://github.com/facebookresearch/sam2/issues/288#issuecomment-2334180449
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
-        # images, video_height, video_width = load_video_frames(
-        #     video_path=video_path,
-        #     image_size=self.image_size,
-        #     offload_video_to_cpu=offload_video_to_cpu,
-        #     async_loading_frames=async_loading_frames,
-        #     compute_device=compute_device,
-        # )
+        if images is None:
+            images, video_height, video_width = load_video_frames(
+                video_path=video_path,
+                prompt_images_path=None,
+                image_size=self.image_size,
+                offload_video_to_cpu=offload_video_to_cpu,
+                async_loading_frames=async_loading_frames,
+                compute_device=compute_device,
+            )
         inference_state = {}
         inference_state["images"] = images
         inference_state["num_frames"] = len(images)
@@ -715,6 +717,7 @@ class SAM2VideoPredictor(SAM2Base):
             # Cache miss -- we will run inference on a single image
             device = inference_state["device"]
             # with torch.inference_mode(False):
+            # breakpoint()
             image = inference_state["images"].clone()[frame_idx].to(device).float().unsqueeze(0)
             # image_t = inference_state["images"][frame_idx]
             # image = torch.clone(image_t).to(device).float().unsqueeze(0)

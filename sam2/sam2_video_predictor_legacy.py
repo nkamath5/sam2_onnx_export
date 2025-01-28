@@ -44,14 +44,17 @@ class SAM2VideoPredictor(SAM2Base):
     def init_state(
         self,
         video_path,
+        prompt_images_path=None,
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
-        async_loading_frames=False,
+        async_loading_frames=True, # can set to True to prevent OOM https://github.com/facebookresearch/sam2/issues/288#issuecomment-2334180449
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
+        # breakpoint()
         images, video_height, video_width = load_video_frames(
             video_path=video_path,
+            prompt_images_path=prompt_images_path,
             image_size=self.image_size,
             offload_video_to_cpu=offload_video_to_cpu,
             async_loading_frames=async_loading_frames,
@@ -326,6 +329,7 @@ class SAM2VideoPredictor(SAM2Base):
         mask,
     ):
         """Add new mask to a frame."""
+        ## breakpoint()
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
         point_inputs_per_frame = inference_state["point_inputs_per_obj"][obj_idx]
         mask_inputs_per_frame = inference_state["mask_inputs_per_obj"][obj_idx]
@@ -596,6 +600,7 @@ class SAM2VideoPredictor(SAM2Base):
         inference_state["tracking_has_started"] = True
         batch_size = self._get_obj_num(inference_state)
 
+        # breakpoint()
         # Consolidate per-object temporary outputs in "temp_output_dict_per_obj" and
         # add them into "output_dict".
         temp_output_dict_per_obj = inference_state["temp_output_dict_per_obj"]
@@ -616,6 +621,7 @@ class SAM2VideoPredictor(SAM2Base):
             consolidated_frame_inds[storage_key].update(temp_frame_inds)
             # consolidate the temporary output across all objects on this frame
             for frame_idx in temp_frame_inds:
+                # breakpoint() # too late to check how obj_ptr is the same at this point since inference_state["temp_output_dict_per_obj"] is already populated with all frames
                 consolidated_out = self._consolidate_temp_output_across_obj(
                     inference_state, frame_idx, is_cond=is_cond, run_mem_encoder=True
                 )
@@ -660,6 +666,32 @@ class SAM2VideoPredictor(SAM2Base):
         assert all_consolidated_frame_inds == input_frames_inds
 
     @torch.inference_mode()
+    def average_obj_ptrs_per_object(self, inference_state):
+        # for obj_idx in inference_state['output_dict_per_obj'].keys():
+        #     cond_frame_outputs = inference_state['output_dict_per_obj'][obj_idx]['cond_frame_outputs']
+        #     cond_frames = list(cond_frame_outputs.keys())
+            
+        #     # FIXME:- can handle this search for first frame better by tracking it earlier and saving in the inference state
+        #     first_i, first_frame = None, None # must get changed to int
+        #     for i in range(len(cond_frames)): # this loop is needed since we might not know which frames have this obj & which do not in a multi obj setting.
+        #         if not torch.all(cond_frame_outputs[cond_frames[i]]["obj_ptr"] == self.no_obj_ptr).item():
+        #             first_i, first_frame = i, cond_frames[i]
+        #             break
+            
+        #     n_for_mean = 1
+        #     for i in range(first_i+1, len(cond_frames)):
+        #         if not torch.all(cond_frame_outputs[cond_frames[i]]["obj_ptr"] == self.no_obj_ptr).item():
+        #             cond_frame_outputs[first_frame]["obj_ptr"] += cond_frame_outputs[cond_frames[i]]["obj_ptr"]  # for first prompted frame
+        #             n_for_mean += 1
+        #     cond_frame_outputs[first_frame]["obj_ptr"] /= n_for_mean # average
+            
+        #     for i in range(first_i+1, len(cond_frames)):
+        #         if not torch.all(cond_frame_outputs[cond_frames[i]]["obj_ptr"] == self.no_obj_ptr).item():
+        #             cond_frame_outputs[cond_frames[i]]["obj_ptr"] = cond_frame_outputs[first_frame]["obj_ptr"] #.clone()
+
+        return inference_state
+    
+    @torch.inference_mode()
     def propagate_in_video(
         self,
         inference_state,
@@ -700,6 +732,7 @@ class SAM2VideoPredictor(SAM2Base):
             )
             processing_order = range(start_frame_idx, end_frame_idx + 1)
 
+        num_of_consolidated_frames_processed = 0
         for frame_idx in tqdm(processing_order, desc="propagate in video"):
             # We skip those frames already in consolidated outputs (these are frames
             # that received input clicks or mask). Note that we cannot directly run
@@ -712,6 +745,12 @@ class SAM2VideoPredictor(SAM2Base):
                 if clear_non_cond_mem:
                     # clear non-conditioning memory of the surrounding frames
                     self._clear_non_cond_mem_around_input(inference_state, frame_idx)
+                num_of_consolidated_frames_processed += 1
+                if num_of_consolidated_frames_processed == len(consolidated_frame_inds["cond_frame_outputs"]):
+                    # obj_ptr for all prompted frames must have been populated now
+                    print(" ##### obj_ptr for all prompted frames must have been populated now #####")
+                    inference_state = self.average_obj_ptrs_per_object(inference_state)
+                    # breakpoint()
             elif frame_idx in consolidated_frame_inds["non_cond_frame_outputs"]:
                 storage_key = "non_cond_frame_outputs"
                 current_out = output_dict[storage_key][frame_idx]
@@ -742,6 +781,8 @@ class SAM2VideoPredictor(SAM2Base):
             _, video_res_masks = self._get_orig_video_res_output(
                 inference_state, pred_masks
             )
+            # if frame_idx ==140:
+            #     breakpoint() # to check if in consolidated_/output_per_obj in inference state is obj_ptr the same for all frames?
             yield frame_idx, obj_ids, video_res_masks
 
     def _add_output_per_object(
@@ -759,6 +800,7 @@ class SAM2VideoPredictor(SAM2Base):
 
         output_dict_per_obj = inference_state["output_dict_per_obj"]
         for obj_idx, obj_output_dict in output_dict_per_obj.items():
+            # breakpoint()
             obj_slice = slice(obj_idx, obj_idx + 1)
             obj_out = {
                 "maskmem_features": None,
@@ -934,6 +976,7 @@ class SAM2VideoPredictor(SAM2Base):
 
         # point and mask should not appear as input simultaneously on the same frame
         assert point_inputs is None or mask_inputs is None
+        # breakpoint()
         current_out = self.track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=is_init_cond_frame,
@@ -975,6 +1018,10 @@ class SAM2VideoPredictor(SAM2Base):
             "obj_ptr": obj_ptr,
             "object_score_logits": object_score_logits,
         }
+
+        # if frame_idx == 150:
+            # breakpoint()
+
         return compact_current_out, pred_masks_gpu
 
     def _run_memory_encoder(
@@ -1030,7 +1077,16 @@ class SAM2VideoPredictor(SAM2Base):
             else:
                 maskmem_pos_enc = model_constants["maskmem_pos_enc"]
             # expand the cached maskmem_pos_enc to the actual batch size
-            batch_size = out_maskmem_pos_enc[0].size(0)
+            # breakpoint()
+            
+            # Nidhish: There seems to be an incorrect calculation for batch_size (# of unique objects) here
+            # possibly due to an assumption that each frame has all object masks.
+            # out_maskmem_pos_enc[0].size(0) gives us 1, but self._get_obj_num() gives us 10)
+            # this was causing a concat error later downstream when using more than one objects to segment.
+            
+            # batch_size = out_maskmem_pos_enc[0].size(0)
+            batch_size = self._get_obj_num(inference_state)
+            
             expanded_maskmem_pos_enc = [
                 x.expand(batch_size, -1, -1, -1) for x in maskmem_pos_enc
             ]

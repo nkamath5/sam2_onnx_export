@@ -141,8 +141,8 @@ class AsyncVideoFrameLoader:
             except Exception as e:
                 self.exception = e
 
-        self.thread = Thread(target=_load_frames, daemon=True)
-        self.thread.start()
+        # self.thread = Thread(target=_load_frames, daemon=True)
+        # self.thread.start() https://github.com/facebookresearch/sam2/issues/264#issuecomment-2315805429
 
     def __getitem__(self, index):
         if self.exception is not None:
@@ -162,7 +162,7 @@ class AsyncVideoFrameLoader:
         img /= self.img_std
         if not self.offload_video_to_cpu:
             img = img.to(self.compute_device, non_blocking=True)
-        self.images[index] = img
+        # self.images[index] = img  https://github.com/facebookresearch/sam2/issues/288#issuecomment-2334180449
         return img
 
     def __len__(self):
@@ -171,6 +171,7 @@ class AsyncVideoFrameLoader:
 
 def load_video_frames(
     video_path,
+    prompt_images_path,
     image_size,
     offload_video_to_cpu,
     img_mean=(0.485, 0.456, 0.406),
@@ -197,6 +198,7 @@ def load_video_frames(
     elif is_str and os.path.isdir(video_path):
         return load_video_frames_from_jpg_images(
             video_path=video_path,
+            prompt_images_path=prompt_images_path,
             image_size=image_size,
             offload_video_to_cpu=offload_video_to_cpu,
             img_mean=img_mean,
@@ -212,6 +214,7 @@ def load_video_frames(
 
 def load_video_frames_from_jpg_images(
     video_path,
+    prompt_images_path,
     image_size,
     offload_video_to_cpu,
     img_mean=(0.485, 0.456, 0.406),
@@ -231,6 +234,7 @@ def load_video_frames_from_jpg_images(
         jpg_folder = video_path
     else:
         raise NotImplementedError(
+            "1. CHECK IF EXACT VIDEO/IMAGE PATH EXISTS (maticd / username). \n"
             "Only JPEG frames are supported at this moment. For video files, you may use "
             "ffmpeg (https://ffmpeg.org/) to extract frames into a folder of JPEG files, such as \n"
             "```\n"
@@ -239,17 +243,33 @@ def load_video_frames_from_jpg_images(
             "where `-q:v` generates high-quality JPEG frames and `-start_number 0` asks "
             "ffmpeg to start the JPEG file from 00000.jpg."
         )
+    img_paths, frame_names_only_prompt = [], []
 
-    frame_names = [
+    # add prompt frames first
+    if isinstance(prompt_images_path, str) and os.path.isdir(prompt_images_path):
+        frame_names_only_prompt.extend([
+            p
+            for p in os.listdir(prompt_images_path)
+            if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
+        ])
+        if len(frame_names_only_prompt) > 0:
+            frame_names_only_prompt.sort(key=lambda p: int(os.path.splitext(p)[0]))
+            img_paths.extend([os.path.join(prompt_images_path, frame_name) for frame_name in frame_names_only_prompt])
+    elif prompt_images_path is not None:
+        raise ValueError("prompt_images_path must be a string (& must exist) or be None.")
+
+    # then add inference frames (video_path)
+    frame_names_only_inferred = [
         p
         for p in os.listdir(jpg_folder)
         if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
     ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-    num_frames = len(frame_names)
+    frame_names_only_inferred.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    num_frames = len(frame_names_only_inferred)
     if num_frames == 0:
         raise RuntimeError(f"no images found in {jpg_folder}")
-    img_paths = [os.path.join(jpg_folder, frame_name) for frame_name in frame_names]
+    img_paths.extend([os.path.join(jpg_folder, frame_name) for frame_name in frame_names_only_inferred])
+    num_frames += len(frame_names_only_prompt)
     img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
     img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
 

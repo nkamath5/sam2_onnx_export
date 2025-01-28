@@ -86,7 +86,7 @@ class SAM2Base(torch.nn.Module):
         fixed_no_obj_ptr: bool = False,
         # Soft no object, i.e. mix in no_obj_ptr softly,
         # hope to make recovery easier if there is a mistake and mitigate accumulation of errors
-        soft_no_obj_ptr: bool = False,
+        soft_no_obj_ptr: bool = False, # TRY Nidhish: Make this True to check False Positives
         use_mlp_for_obj_ptr_proj: bool = False,
         # add no obj embedding to spatial frames
         no_obj_embed_spatial: bool = False,
@@ -193,6 +193,7 @@ class SAM2Base(torch.nn.Module):
                 fullgraph=True,
                 dynamic=False,
             )
+        # breakpoint()
 
     @property
     def device(self):
@@ -238,6 +239,7 @@ class SAM2Base(torch.nn.Module):
             use_multimask_token_for_obj_ptr=self.use_multimask_token_for_obj_ptr,
             **(self.sam_mask_decoder_extra_args or {}),
         )
+        # breakpoint()
         if self.use_obj_ptrs_in_encoder:
             # a linear projection on SAM output tokens to turn them into object pointers
             self.obj_ptr_proj = torch.nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -261,6 +263,7 @@ class SAM2Base(torch.nn.Module):
         mask_inputs=None,
         high_res_features=None,
         multimask_output=False,
+        use_mask_as_indication_of_obj=False,
     ):
         """
         Forward SAM prompt encoders and mask heads.
@@ -357,7 +360,7 @@ class SAM2Base(torch.nn.Module):
             high_res_features=high_res_features,
         )
         if self.pred_obj_scores:
-            is_obj_appearing = object_score_logits > 0
+            is_obj_appearing = (object_score_logits > 0) + use_mask_as_indication_of_obj
 
             # Mask used for spatial memories is always a *hard* choice between obj and no obj,
             # consistent with the actual mask prediction
@@ -389,6 +392,23 @@ class SAM2Base(torch.nn.Module):
         else:
             low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
 
+        # NOTE Nidhish: Things seem off here. During add_new_masks() this fn 
+        # is called via use_mask_as_output() to get an obj_ptr.
+        # It seems that is_obj_appearing refers to if a obj which will be tracked is present
+        # But here, the code depends on the object_score_logits to determine if an object is present.
+        # For the prompt frames with an input mask (we are calling add mask fn), 
+        # decoder seems to think there is no object & hence obj_ptr ends up getting the value of self.no_obj_ptr
+        # Which seems wrong.
+
+        # (Pdb) inference_state['output_dict']['cond_frame_outputs'].keys()
+        # dict_keys([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65])
+        # (Pdb) inference_state['output_dict']['cond_frame_outputs'][0].keys()
+        # dict_keys(['maskmem_features', 'maskmem_pos_enc', 'pred_masks', 'obj_ptr', 'object_score_logits'])
+        # (Pdb) torch.all(inference_state['output_dict']['cond_frame_outputs'][0]['obj_ptr'] == self.no_obj_ptr)
+        # tensor(True, device='cuda:0')
+        # (Pdb) torch.all(inference_state['output_dict']['cond_frame_outputs'][65]['obj_ptr'] == self.no_obj_ptr)
+        # tensor(True, device='cuda:0')
+        
         # Extract object pointer from the SAM output token (with occlusion handling)
         obj_ptr = self.obj_ptr_proj(sam_output_token)
         if self.pred_obj_scores:
@@ -441,6 +461,7 @@ class SAM2Base(torch.nn.Module):
                 backbone_features=backbone_features,
                 mask_inputs=self.mask_downsample(mask_inputs_float),
                 high_res_features=high_res_features,
+                use_mask_as_indication_of_obj=True,
             )
         # In this method, we are treating mask_input as output, e.g. using it directly to create spatial mem;
         # Below, we follow the same design axiom to use mask_input to decide if obj appears or not instead of relying
@@ -453,6 +474,8 @@ class SAM2Base(torch.nn.Module):
             if self.fixed_no_obj_ptr:
                 obj_ptr = lambda_is_obj_appearing * obj_ptr
             obj_ptr = obj_ptr + (1 - lambda_is_obj_appearing) * self.no_obj_ptr
+
+        # breakpoint()
 
         return (
             low_res_masks,
@@ -506,6 +529,7 @@ class SAM2Base(torch.nn.Module):
         track_in_reverse=False,  # tracking in reverse time order (for demo usage)
     ):
         """Fuse the current frame's visual feature map with previous memory."""
+        # breakpoint()
         B = current_vision_feats[-1].size(1)  # batch size on this frame
         C = self.hidden_dim
         H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
@@ -564,7 +588,11 @@ class SAM2Base(torch.nn.Module):
                 if out is None:
                     # If an unselected conditioning frame is among the last (self.num_maskmem - 1)
                     # frames, we still attend to it as if it's a non-conditioning frame.
-                    out = unselected_cond_outputs.get(prev_frame_idx, None)
+
+                    # NOTE Nidhish: Perhaps we shouldn't do this. Maybe this results in false positives at the start of the video? 
+                    # Our conditioning frames would not have any temporal relation with inferred frames.
+                    # Hence commenting on Jan 24 19:15. Evaluate if results get better.
+                    out = None # unselected_cond_outputs.get(prev_frame_idx, None)
                 t_pos_and_prevs.append((t_pos, out))
 
             for t_pos, prev in t_pos_and_prevs:
@@ -575,6 +603,7 @@ class SAM2Base(torch.nn.Module):
                 feats = prev["maskmem_features"].to(device, non_blocking=True)
                 to_cat_memory.append(feats.flatten(2).permute(2, 0, 1))
                 # Spatial positional encoding (it might have been offloaded to CPU in eval)
+                # breakpoint()
                 maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
                 maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
                 # Temporal positional encoding
@@ -599,10 +628,16 @@ class SAM2Base(torch.nn.Module):
                 pos_and_ptrs = [
                     # Temporal pos encoding contains how far away each pointer is from current frame
                     (
+                        # NOTE Nidhish: Made `t` a constant here to avoid biasing towards any prompted frame.
+                        # (
+                        #     (frame_idx - t) * tpos_sign_mul
+                        #     if self.use_signed_tpos_enc_to_obj_ptrs
+                        #     else abs(frame_idx - t)
+                        # ),
                         (
-                            (frame_idx - t) * tpos_sign_mul
+                            (frame_idx - 0) * tpos_sign_mul
                             if self.use_signed_tpos_enc_to_obj_ptrs
-                            else abs(frame_idx - t)
+                            else abs(frame_idx - 0)
                         ),
                         out["obj_ptr"],
                     )
@@ -644,11 +679,14 @@ class SAM2Base(torch.nn.Module):
                         obj_ptrs = obj_ptrs.permute(0, 2, 1, 3).flatten(0, 1)
                         obj_pos = obj_pos.repeat_interleave(C // self.mem_dim, dim=0)
                     to_cat_memory.append(obj_ptrs)
+                    # breakpoint()
                     to_cat_memory_pos_embed.append(obj_pos)
                     num_obj_ptr_tokens = obj_ptrs.shape[0]
+                    # print(obj_pos.shape, "shape of obj_pos for frame idx", frame_idx)
                 else:
                     num_obj_ptr_tokens = 0
         else:
+            # breakpoint()
             # for initial conditioning frames, encode them without using any previous memory
             if self.directly_add_no_mem_embed:
                 # directly add no-mem embedding (instead of using the transformer encoder)
@@ -662,6 +700,8 @@ class SAM2Base(torch.nn.Module):
 
         # Step 2: Concatenate the memories and forward through the transformer encoder
         memory = torch.cat(to_cat_memory, dim=0)
+        # if frame_idx > 64:
+        #     breakpoint()
         memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
 
         pix_feat_with_mem = self.memory_attention(
