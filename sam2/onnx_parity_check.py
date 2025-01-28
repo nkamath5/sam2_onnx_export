@@ -83,6 +83,7 @@ def run_parity_check(pytorch_model, onnx_session, input_tensor, actual_image):
         ox_img_rgb = actual_image.copy()
         ox_img_rgb[ox_mask] = mask_overlay_color
         now = datetime.now().strftime("%m%d%H%M")
+        breakpoint()
         cv2.imwrite(f"pytorch_seg_{now}.png", pt_img_rgb)
         cv2.imwrite(f"onnx_seg_{now}.png", ox_img_rgb)
         print(f"Segmented images for PT & Onnx saved to cwd.")
