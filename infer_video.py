@@ -7,29 +7,29 @@ from torchvision.ops import box_convert
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
-from sam2.build_sam import build_sam2_video_predictor_legacy
+from sam2.build_sam import build_sam2_video_predictor, build_sam2_video_predictor_legacy
 from typing import Dict, Any
 import argparse
 
 # Add argument parser
 parser = argparse.ArgumentParser(description='Video frame processing script with SAM2')
 parser.add_argument('-v', '--output-video', type=str, 
-                    default="tassels_eval_kanyes_home.mp4", #"./shaf_home_glass_door_rotten_juice_rear1_local.mp4"
+                    default="kanyest_home_rgb_subset.mp4", #"./shaf_home_glass_door_rotten_juice_rear1_local.mp4"
                     help='Path for output video file')
 parser.add_argument('-fps' ,'--fps', type=int, 
                     default=25,
                     help='FPS for output video file')
 parser.add_argument('-i', '--source-frames', type=str,
-                    default="./assets/kanyest_and_other_masks_front0",
+                    default="./assets/kanyest_home_rgb_subset",
                     help='Directory containing source video frames')
 parser.add_argument('-o', '--tracking-results', type=str,
-                    default="./tracking_results/kanyest_and_other_masks_front0",
+                    default="./tracking_results/kanyest_home_rgb_subset",
                     help='Directory to save tracking results')
 parser.add_argument('-p', '--prompt-img-dir', type=str,
-                    default="/home/nidhish/matic_2/sam2_onnx_export/masks/all_image_jpg", 
+                    default="default", 
                     help='Directory containing prompt images for which masks are provided')
 parser.add_argument('-m', '--mask-dir', type=str,
-                    default="/home/nidhish/matic_2/sam2_onnx_export/masks/all_mask_npz", #"./assets/amy_floor_habitual_handball/perception_rgb/front0_masks"
+                    default="./masks/masks_tassels/all_mask_npz", #"./assets/amy_floor_habitual_handball/perception_rgb/front0_masks"
                     help='Directory containing NPZ mask files')
 parser.add_argument('--sam-checkpoint', type=str,
                     default="./checkpoints/sam2.1_hiera_tiny.pt",
@@ -42,25 +42,26 @@ args = parser.parse_args()
 
 # Set variables with argument values and print if using defaults
 OUTPUT_VIDEO_PATH = args.output_video
-if OUTPUT_VIDEO_PATH == "tassels_eval_kanyes_home.mp4":
+if OUTPUT_VIDEO_PATH == "kanyest_home_rgb_subset.mp4":
     print("Using default output video path:", OUTPUT_VIDEO_PATH)
 
 fps = args.fps
 
 SOURCE_VIDEO_FRAME_DIR = args.source_frames
-if SOURCE_VIDEO_FRAME_DIR == "./assets/kanyest_and_other_masks_front0":
+if SOURCE_VIDEO_FRAME_DIR == "./assets/kanyest_home_rgb_subset":
     print("Using default source frames directory:", SOURCE_VIDEO_FRAME_DIR)
 
 SAVE_TRACKING_RESULTS_DIR = args.tracking_results
-if SAVE_TRACKING_RESULTS_DIR == "./tracking_results/kanyest_and_other_masks_front0":
+if SAVE_TRACKING_RESULTS_DIR == "./tracking_results/kanyest_home_rgb_subset":
     print("Using default tracking results directory:", SAVE_TRACKING_RESULTS_DIR)
 
 prompt_images_path = args.prompt_img_dir
-if prompt_images_path == "/home/nidhish/matic_2/sam2_onnx_export/masks/all_image_jpg":
+if prompt_images_path == "default":
+    prompt_images_path = SOURCE_VIDEO_FRAME_DIR
     print("Using default prompt images directory:", prompt_images_path)
 
 mask_dir = args.mask_dir
-if mask_dir == "/home/nidhish/matic_2/sam2_onnx_export/masks/all_mask_npz":
+if mask_dir == "./masks/masks_tassels/all_mask_npz":
     print("Using default mask directory:", mask_dir)
 
 sam2_checkpoint = args.sam_checkpoint
@@ -72,6 +73,7 @@ if model_cfg == "configs/sam2.1/sam2.1_hiera_t.yaml":
     print("Using default model configuration:", model_cfg)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+torch.cuda.set_device(6)
 
 os.makedirs(SAVE_TRACKING_RESULTS_DIR, exist_ok=True)
 
@@ -82,11 +84,6 @@ Step 1: Environment settings and model initialization for SAM 2
 # init sam image predictor and video predictor model
 sam2_checkpoint = "./checkpoints/sam2.1_hiera_tiny.pt" #"./checkpoints/sam2.1_hiera_large.pt" #"./checkpoints/sam2.1_hiera_base_plus.pt" # #"./checkpoints/sam2.1_hiera_tiny.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml" #"configs/sam2.1/sam2.1_hiera_l.yaml" #"configs/sam2.1/sam2.1_hiera_b+.yaml" # #"configs/sam2.1/sam2.1_hiera_t.yaml"
-
-video_predictor = build_sam2_video_predictor_legacy(model_cfg, sam2_checkpoint)
-# sam2_image_model = build_sam2(model_cfg, sam2_checkpoint)
-# image_predictor = SAM2ImagePredictor(sam2_image_model)
-
 
 # scan all the JPEG/PNG frame names in this directory
 frame_names = [
@@ -101,11 +98,13 @@ infer_frame_names = [
 ]
 infer_frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
+# video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint) 
+video_predictor = build_sam2_video_predictor_legacy(model_cfg, sam2_checkpoint)
 
 # init video predictor state
-inference_state = video_predictor.init_state(SOURCE_VIDEO_FRAME_DIR)
+# inference_state = video_predictor.init_state(SOURCE_VIDEO_FRAME_DIR)
+inference_state = video_predictor.init_state(SOURCE_VIDEO_FRAME_DIR, prompt_images_path)
 
-# ann_frame_idx = 0  # the frame index we interact with
 """
 Step 2: Carry over torch possibly relevant stuff from grounding dino's script
 """
@@ -167,7 +166,7 @@ for frame_idx in sorted(annotated_frames.keys()):
     
     for obj_id, mask in frame_objects.items():
         print(f"Registering mask for object {obj_id} at frame {frame_idx}")
-        _, out_obj_ids, out_mask_logits = video_predictor.add_new_mask(
+        _, _out_obj_ids, _out_mask_logits = video_predictor.add_new_mask(
             inference_state=inference_state,
             frame_idx=frame_idx,
             obj_id=obj_id,
