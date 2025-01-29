@@ -68,7 +68,7 @@ if mask_dir == "./masks/masks_tassels/all_mask_npz":
 model_size = args.model_size
 assert model_size in ["tiny", "small", "base_plus", "large"], "Invalid model size. Choose from: tiny, small, base_plus, large."
 print("Using model size:", model_size)
-sam2_checkpoint = f"./checkpoints/sam2.1_hiera_{model_size}}.pt"
+sam2_checkpoint = f"./checkpoints/sam2.1_hiera_{model_size}.pt"
 model_cfg = f"configs/sam2.1/sam2.1_hiera_{model_size[0]}.yaml"
 if model_size == "base_plus":
     model_cfg = "configs/sam2.1/sam2.1_hiera_b+.yaml"
