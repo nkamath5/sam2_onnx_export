@@ -31,12 +31,13 @@ parser.add_argument('-p', '--prompt-img-dir', type=str,
 parser.add_argument('-m', '--mask-dir', type=str,
                     default="./masks/masks_tassels/all_mask_npz", #"./assets/amy_floor_habitual_handball/perception_rgb/front0_masks"
                     help='Directory containing NPZ mask files')
-parser.add_argument('--sam-checkpoint', type=str,
-                    default="./checkpoints/sam2.1_hiera_tiny.pt",
-                    help='Path to SAM2 checkpoint file')
-parser.add_argument('--model-config', type=str,
-                    default="configs/sam2.1/sam2.1_hiera_t.yaml",
-                    help='Path to model configuration file')
+parser.add_argument('-ms', '--model-size', type=str, default="tiny", help='Model size for SAM2')
+# parser.add_argument('--sam-checkpoint', type=str,
+#                     default="./checkpoints/sam2.1_hiera_tiny.pt",
+#                     help='Path to SAM2 checkpoint file')
+# parser.add_argument('--model-config', type=str,
+#                     default="configs/sam2.1/sam2.1_hiera_t.yaml",
+#                     help='Path to model configuration file')
 
 args = parser.parse_args()
 
@@ -64,16 +65,24 @@ mask_dir = args.mask_dir
 if mask_dir == "./masks/masks_tassels/all_mask_npz":
     print("Using default mask directory:", mask_dir)
 
-sam2_checkpoint = args.sam_checkpoint
-if sam2_checkpoint == "./checkpoints/sam2.1_hiera_tiny.pt":
-    print("Using default SAM2 checkpoint:", sam2_checkpoint)
+model_size = args.model_size
+assert model_size in ["tiny", "small", "base_plus", "large"], "Invalid model size. Choose from: tiny, small, base_plus, large."
+print("Using model size:", model_size)
+sam2_checkpoint = f"./checkpoints/sam2.1_hiera_{model_size}}.pt"
+model_cfg = f"configs/sam2.1/sam2.1_hiera_{model_size[0]}.yaml"
+if model_size == "base_plus":
+    model_cfg = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 
-model_cfg = args.model_config
-if model_cfg == "configs/sam2.1/sam2.1_hiera_t.yaml":
-    print("Using default model configuration:", model_cfg)
+# sam2_checkpoint = args.sam_checkpoint
+# if sam2_checkpoint == "./checkpoints/sam2.1_hiera_tiny.pt":
+#     print("Using default SAM2 checkpoint:", sam2_checkpoint)
+
+# model_cfg = args.model_config
+# if model_cfg == "configs/sam2.1/sam2.1_hiera_t.yaml":
+#     print("Using default model configuration:", model_cfg)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-torch.cuda.set_device(6)
+# torch.cuda.set_device(6)
 
 os.makedirs(SAVE_TRACKING_RESULTS_DIR, exist_ok=True)
 
