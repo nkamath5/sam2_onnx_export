@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Union
 import cv2
 import matplotlib
 import numpy as np
@@ -18,8 +18,13 @@ import supervision as sv
 matplotlib.use("TkAgg")
 
 # SAM2 imports
-from sam2.build_sam import build_sam2
+from sam2.build_sam import build_sam2, build_sam2_video_predictor
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.sam2_video_predictor import SAM2VideoPredictorVOS
+
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+
 
 # FIXME: Nidhish: Import SegType & SEGMENTATION_PALETTE from mt/nn
 class SegType(int, Enum):
@@ -51,13 +56,17 @@ class SegType(int, Enum):
 @dataclass
 class ObjectTracker:
     id: int
-    label: str
+    label: str # object label/ name
     color: Tuple[float, float, float]
     masks: Dict[int, np.ndarray]  # frame_idx -> mask
-    points: Dict[int, List[Tuple[float, float, int]]]  # frame_idx -> [(x, y, label)]
+    points: Dict[int, List[Tuple[float, float, int]]]  # frame_idx -> [(x, y, label)] (label: 0=bg, 1=fg)
+
+# @dataclass
+# class PromptedFrames:
+#     frames: Dict[int, str]  # frame_idx -> file path as str
 
 class MultiObjectTrackingGUI:   
-    def __init__(self, image_dir: Path, mask_dir: Path, max_points_per_frame: int = 50):
+    def __init__(self, image_dir: Path, mask_dir: Path, max_points_per_frame: int = 100):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
         self.max_points_per_frame = max_points_per_frame
@@ -147,7 +156,7 @@ class MultiObjectTrackingGUI:
         for mask_path in mask_files:
             try:
                 mask_data = np.load(mask_path)
-                frame_idx = int(mask_path.stem)  # Assuming filenames are frame indices
+                frame_idx = self.file_stem_to_idx[mask_path.stem]
                 
                 # breakpoint()
                 for key in mask_data.keys():
@@ -204,6 +213,11 @@ class MultiObjectTrackingGUI:
         # breakpoint()
         self.sam2_model = build_sam2(SAM2_MODEL_CONFIG, SAM2_CHECKPOINT, device=DEVICE)
         self.sam2_predictor = SAM2ImagePredictor(self.sam2_model)
+        self.sam2_VOS_model = build_sam2_video_predictor(config_file=SAM2_MODEL_CONFIG, ckpt_path=SAM2_CHECKPOINT, 
+                                                     vos_optimized=True, device=DEVICE)
+        # self.sam2_inference_state = None
+        torch.compiler.cudagraph_mark_step_begin()
+        self.sam2_inference_state = self.sam2_VOS_model.init_state(str(self.image_dir))
         print("[INFO] SAM2 model loaded successfully.")
 
     def setup_image_paths(self):
@@ -215,6 +229,7 @@ class MultiObjectTrackingGUI:
         if len(self.image_paths) == 0:
             raise ValueError(f"No image files found in {self.image_dir}")
         self.num_frames = len(self.image_paths)
+        self.file_stem_to_idx = {path.stem: idx for idx, path in enumerate(self.image_paths)} # use to match on mask stem
 
     def setup_display(self):
         """Setup matplotlib display"""
@@ -421,6 +436,9 @@ class MultiObjectTrackingGUI:
         # Update mask using all points
         new_mask = self.predict_mask_from_points(obj.points[self.current_index])
         if new_mask is not None:
+            # if obj.masks.get(self.current_index) is not None:
+            #     obj.masks[self.current_index] = obj.masks[self.current_index] | new_mask
+            # else:
             obj.masks[self.current_index] = new_mask
             
         self.dirty = True
@@ -440,7 +458,7 @@ class MultiObjectTrackingGUI:
         # Set image in predictor (ensure no negative strides)
         bgr2rgb = bgr[..., ::-1].copy()
         self.sam2_predictor.set_image(bgr2rgb)
-        
+
         # Load masks and points from NPZ if they exist
         mask_path = self.mask_dir / f"{self.image_paths[idx].stem}.npz"
         if mask_path.exists():
@@ -459,6 +477,90 @@ class MultiObjectTrackingGUI:
                     points_array = data[points_key]
                     if len(points_array) > 0:  # Check if there are any points
                         obj.points[idx] = [tuple(p) for p in points_array]
+
+        # get a new inference state for SAM2 Video Pred with just this image
+        current_img_path = str(self.image_paths[idx])
+        img_paths = []
+        # add all the prompts from before to img_paths
+        for obj_id in self.objects:
+            obj = self.objects[obj_id]
+            for prompt_img_idx in obj.points.keys():
+                img_paths.append(str(self.image_paths[prompt_img_idx]))
+        if current_img_path in img_paths:
+            return # if this image is already in the prompt list, then we don't need to infer again
+        # img_paths.append(current_img_path)
+        if len(img_paths) < 1:
+            return # "It makes sense to infer on SAM2 VOS only if we have at least 1 prompt image & 1 inference image"
+        print(f"Inferring SAM2 VOS on {current_img_path}")
+        # since same img can be added twice; we are also assuming that the items in img_paths are in the same dir.
+        img_paths = sorted(set(img_paths))
+        if self.sam2_inference_state is not None:
+            self.sam2_VOS_model.reset_state(self.sam2_inference_state)
+            # torch.compiler.cudagraph_mark_step_begin()
+        # self.sam2_inference_state = self.sam2_VOS_model.init_state(self.image_dir, img_paths=img_paths)
+        print(f"[INFO] Inference state initialized for SAM2 VOS") # for {len(img_paths)} images")
+        # add all the prompts from before
+        prompt_dict = {} # frame_idx -> {obj_id: {(x,y): label}}
+        for obj_id in tqdm(self.objects):
+            # if obj_id == 9:
+            #     breakpoint()
+            obj = self.objects[obj_id]
+            if not obj.masks:
+                continue
+            for prompt_img_idx , points_list in obj.points.items():
+                for x, y, label in points_list:
+                    prompt_dict[prompt_img_idx] = {obj_id: {(x,y): label}}
+                    
+            for prompt_img_idx in prompt_dict.keys():
+                for obj_id in prompt_dict[prompt_img_idx].keys():
+                    xy_list = list(prompt_dict[prompt_img_idx][obj_id].keys())
+                    label_list = list(prompt_dict[prompt_img_idx][obj_id].values())
+                    _, _, _, _ = self.sam2_VOS_model.add_new_points_or_box(self.sam2_inference_state, 
+                                                            # since idx in self.image_paths will be different than the video slice (subset of all image frames) that we sent to SAM2
+                                                            img_paths.index(str(self.image_paths[prompt_img_idx])), # TODO: Do this a better way.
+                                                            obj_id, 
+                                                            points=xy_list, 
+                                                            labels=label_list, 
+                                                            )
+        if prompt_dict:
+            print(f"[INFO] {len(prompt_dict.keys())} Prompts added")
+        else:
+            print("[INFO] No prompts to add")
+            breakpoint()
+        # predict on this image if prompt dict is not empty
+        # inferred_segmentation_on_img = {}
+        if prompt_dict: # only run inference if there were prompts to begin with
+            # out_frame_idxs, out_obj_ids, out_mask_logits = self.sam2_VOS_model.propagate_in_video(self.sam2_inference_state)
+            for out_frame_idx, out_obj_ids, out_mask_logits in self.sam2_VOS_model.propagate_in_video(
+                                                                            self.sam2_inference_state,
+                                                                            start_frame_idx=idx,
+                                                                            max_frame_num_to_track=2,):
+                
+                # if isinstance(out_frame_idxs, int):
+                #     out_frame_idxs = [out_frame_idxs]
+                # ONLY INDEX 0 is coming out as the inference frame so used yield
+                # print(f"[INFO] Inferred on {len(out_frame_idxs)} frames")
+                # for out_frame_idx in out_frame_idxs:
+                print("[INFO] Inference done")
+                if out_frame_idx != idx:
+                    print(f"out_frame_idx: {out_frame_idx} != inferred image idx: {idx}")
+                    continue # this would be a prompted frame
+                for i, obj_id in enumerate(out_obj_ids):
+                    obj = self.objects[obj_id]
+                    obj.masks[idx] = (out_mask_logits[i] > 0.0).cpu().numpy().squeeze()
+                    # breakpoint()
+                break # dont need to process remaining prompted frames
+                
+                # if out_frame_idx == idx:
+                #     inferred_segmentation_on_img[out_frame_idx] = {
+                #         out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                #         for i, out_obj_id in enumerate(out_obj_ids)
+                #     }
+
+                # # add the inferred mask to all objects' masks for this frame
+                # for obj_id in self.objects:
+                #     obj = self.objects[obj_id]
+                #     obj.masks[idx] = inferred_segmentation_on_img[] # idx is the idx in self.image_paths
 
     def redraw_overlay(self):
         """Redraw the image with all object masks and points overlaid"""
@@ -604,7 +706,7 @@ def main():
         "--image-dir",
         type=Path,
         required=True,
-        help="Path to directory containing images"
+        help="Path to directory containing images or video frames (list of images)"
     )
     parser.add_argument(
         "-m",
