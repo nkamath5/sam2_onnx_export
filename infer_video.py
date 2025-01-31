@@ -10,11 +10,12 @@ from PIL import Image
 from sam2.build_sam import build_sam2_video_predictor, build_sam2_video_predictor_legacy
 from typing import Dict, Any
 import argparse
+import subprocess
 
 # Add argument parser
 parser = argparse.ArgumentParser(description='Video frame processing script with SAM2')
 parser.add_argument('-v', '--output-video', type=str, 
-                    default="kanyest_home_rgb_subset.mp4", #"./shaf_home_glass_door_rotten_juice_rear1_local.mp4"
+                    default=None, #"./shaf_home_glass_door_rotten_juice_rear1_local.mp4"
                     help='Path for output video file')
 parser.add_argument('-fps' ,'--fps', type=int, 
                     default=25,
@@ -23,15 +24,16 @@ parser.add_argument('-i', '--source-frames', type=str,
                     default="./assets/kanyest_home_rgb_subset",
                     help='Directory containing source video frames')
 parser.add_argument('-o', '--tracking-results', type=str,
-                    default="./tracking_results/kanyest_home_rgb_subset",
+                    default=None,
                     help='Directory to save tracking results')
 parser.add_argument('-p', '--prompt-img-dir', type=str,
-                    default="default", 
+                    default=None, 
                     help='Directory containing prompt images for which masks are provided')
 parser.add_argument('-m', '--mask-dir', type=str,
                     default="./masks/masks_tassels/all_mask_npz", #"./assets/amy_floor_habitual_handball/perception_rgb/front0_masks"
                     help='Directory containing NPZ mask files')
 parser.add_argument('-ms', '--model-size', type=str, default="tiny", help='Model size for SAM2')
+parser.add_argument('-vp', '--videopath', type=str, default=None, help='Path to video file (if its an mp4 and not list of images) for inference')
 # parser.add_argument('--sam-checkpoint', type=str,
 #                     default="./checkpoints/sam2.1_hiera_tiny.pt",
 #                     help='Path to SAM2 checkpoint file')
@@ -42,28 +44,30 @@ parser.add_argument('-ms', '--model-size', type=str, default="tiny", help='Model
 args = parser.parse_args()
 
 # Set variables with argument values and print if using defaults
-OUTPUT_VIDEO_PATH = args.output_video
-if OUTPUT_VIDEO_PATH == "kanyest_home_rgb_subset.mp4":
-    print("Using default output video path:", OUTPUT_VIDEO_PATH)
-
-fps = args.fps
-
 SOURCE_VIDEO_FRAME_DIR = args.source_frames
 if SOURCE_VIDEO_FRAME_DIR == "./assets/kanyest_home_rgb_subset":
     print("Using default source frames directory:", SOURCE_VIDEO_FRAME_DIR)
 
-SAVE_TRACKING_RESULTS_DIR = args.tracking_results
-if SAVE_TRACKING_RESULTS_DIR == "./tracking_results/kanyest_home_rgb_subset":
-    print("Using default tracking results directory:", SAVE_TRACKING_RESULTS_DIR)
-
 prompt_images_path = args.prompt_img_dir
-if prompt_images_path == "default":
+if prompt_images_path is None:
     prompt_images_path = SOURCE_VIDEO_FRAME_DIR
     print("Using default prompt images directory:", prompt_images_path)
 
 mask_dir = args.mask_dir
 if mask_dir == "./masks/masks_tassels/all_mask_npz":
     print("Using default mask directory:", mask_dir)
+
+SAVE_TRACKING_RESULTS_DIR = args.tracking_results
+if SAVE_TRACKING_RESULTS_DIR is None:
+    SAVE_TRACKING_RESULTS_DIR = f"{SOURCE_VIDEO_FRAME_DIR}/tracking_results"
+    print("Using default tracking results directory:", SAVE_TRACKING_RESULTS_DIR)
+
+OUTPUT_VIDEO_PATH = args.output_video
+if OUTPUT_VIDEO_PATH is None:
+    OUTPUT_VIDEO_PATH = f"{SAVE_TRACKING_RESULTS_DIR}/seg_output.mp4"
+    print("Using default output video path:", OUTPUT_VIDEO_PATH)
+
+fps = args.fps
 
 model_size = args.model_size
 assert model_size in ["tiny", "small", "base_plus", "large"], "Invalid model size. Choose from: tiny, small, base_plus, large."
@@ -93,6 +97,28 @@ Step 1: Environment settings and model initialization for SAM 2
 # init sam image predictor and video predictor model
 sam2_checkpoint = "./checkpoints/sam2.1_hiera_tiny.pt" #"./checkpoints/sam2.1_hiera_large.pt" #"./checkpoints/sam2.1_hiera_base_plus.pt" # #"./checkpoints/sam2.1_hiera_tiny.pt"
 model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml" #"configs/sam2.1/sam2.1_hiera_l.yaml" #"configs/sam2.1/sam2.1_hiera_b+.yaml" # #"configs/sam2.1/sam2.1_hiera_t.yaml"
+
+if args.videopath:
+    """
+    Custom video input directly using video files
+    """
+    VIDEO_PATH = args.videopath
+    video_info = sv.VideoInfo.from_video_path(VIDEO_PATH)  # get video info
+    print(video_info)
+    frame_generator = sv.get_video_frames_generator(VIDEO_PATH, stride=1, start=0, end=None)
+
+    # saving video to frames
+    source_frames = Path(SOURCE_VIDEO_FRAME_DIR)
+    source_frames.mkdir(parents=True, exist_ok=True)
+
+    with sv.ImageSink(
+        target_dir_path=source_frames, 
+        overwrite=True, 
+        image_name_pattern="{:05d}.jpg"
+    ) as sink:
+        for frame in tqdm(frame_generator, desc="Saving Video Frames"):
+            sink.save_image(frame)
+
 
 # scan all the JPEG/PNG frame names in this directory
 frame_names = [
@@ -196,6 +222,8 @@ for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_
         for i, out_obj_id in enumerate(out_obj_ids)
     }
 
+# breakpoint() # check unique values in video_segments
+
 """
 Step 5: Visualize the segment results across the video and save them
 """
@@ -217,7 +245,7 @@ def save_mask_with_object_ids(frame_names,
     """
     # Initialize empty mask with zeros
     # combined_mask = np.zeros(frame_shape[:2], dtype=np.int32)
-    combined_mask = np.zeros(list(segments.values())[0].shape[-2:], dtype=np.int32)
+    combined_mask = np.zeros(list(segments.values())[0].shape[-2:], dtype=np.uint8)
     
     # Process each segment
     for key, mask in segments.items():
@@ -252,7 +280,9 @@ def save_mask_with_object_ids(frame_names,
     # Save the combined mask as PNG
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, frame_names[frame_idx])
-    cv2.imwrite(output_path, combined_mask)
+    img = Image.fromarray(combined_mask)
+    img.save(output_path[:-3] + "png") # if frame_names are in jpg format
+    # cv2.imwrite(output_path, combined_mask)
 
 # Visualize and save frames
 for frame_idx, segments in video_segments.items():
@@ -299,9 +329,34 @@ for frame_idx, segments in video_segments.items():
             class_id=np.array(object_ids, dtype=np.int32),
         )
         
+        custom_colors = [
+            (0, 0, 0),
+            (50, 50, 50),
+            (252, 194, 10),
+            (135, 17, 8),
+            (0, 255, 255),
+            (255, 0, 0),
+            (30, 100, 190),
+            (211, 100, 60),
+            (255, 105, 180),
+            (128, 128, 0),
+            (121, 72, 47),
+            (0, 145, 100),
+            (255, 0, 255), # magenta
+            (0, 255, 0), # green
+            (150, 75, 0), # brown
+            (0, 0, 255), # blue
+            (255, 255, 255), # white
+            (0, 0, 128), # navy
+            (255, 255, 0), # yellow
+            (0, 128, 128), # teal
+            (128, 0, 0), # maroon
+        ]
+
+
         # Create annotators with default settings
         box_annotator = sv.BoxAnnotator()
-        mask_annotator = sv.MaskAnnotator()
+        mask_annotator = sv.MaskAnnotator(color=sv.ColorPalette([sv.Color(color[0], color[1], color[2]) for color in custom_colors]))
         label_annotator = sv.LabelAnnotator()
         
         # Apply annotations
@@ -345,37 +400,66 @@ Step 6: Convert the annotated frames to video
 """
 
 def create_video_from_images(image_folder, prompt_images_path, output_video_path, frame_rate=25):
+    """
+    Create a video from images using FFmpeg, combining prompt images and inferred images
+    """
     valid_extensions = [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
     
+    # Get and sort image files from both directories
     image_files = [f for f in os.listdir(image_folder) 
                    if os.path.splitext(f)[1] in valid_extensions]
     prompt_files = [f for f in os.listdir(prompt_images_path)
                      if os.path.splitext(f)[1] in valid_extensions]
     image_files.sort()
     prompt_files.sort()
-    print("Prompted images", prompt_files)
-    print("Inferred Images", image_files)
+    print("Prompted images:", prompt_files)
+    print("Inferred Images:", image_files)
     
-    if not image_files:
-        raise ValueError("No valid image files found in the specified folder.")
+    if not image_files and not prompt_files:
+        raise ValueError("No valid image files found in the specified folders.")
     
-    first_image_path = os.path.join(image_folder, image_files[0])
-    first_image = cv2.imread(first_image_path)
-    height, width, _ = first_image.shape
+    # Create a temporary file listing all images in order
+    with open('temp_file_list.txt', 'w') as f:
+        # Write prompt images
+        # for img in prompt_files:
+        #     f.write(f"file '{os.path.join(os.path.abspath(prompt_images_path), img)}'\n")
+        #     f.write(f"duration {1/frame_rate}\n")
+        
+        # Write inferred images
+        for img in image_files:
+            f.write(f"file '{os.path.join(os.path.abspath(image_folder), img)}'\n")
+            f.write(f"duration {1/frame_rate}\n")
+        
+        # Write the last image one more time (required by FFmpeg)
+        if image_files:
+            f.write(f"file '{os.path.join(os.path.abspath(image_folder), image_files[-1])}'\n")
+        elif prompt_files:
+            f.write(f"file '{os.path.join(os.path.abspath(prompt_images_path), prompt_files[-1])}'\n")
+
+    # FFmpeg command
+    ffmpeg_cmd = [
+        'ffmpeg',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', 'temp_file_list.txt',
+        '-vsync', 'vfr',
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-y',
+        output_video_path
+    ]
     
-    # Change the codec to 'avc1' or 'H264'
-    fourcc = cv2.VideoWriter_fourcc(*'H264')  # alternatively, use 'H264'
-    video_writer = cv2.VideoWriter(output_video_path, fourcc, frame_rate, (width, height))
-    
-    for image_file in tqdm(prompt_files+image_files):
-        image_path = os.path.join(image_folder, image_file)
-        image = cv2.imread(image_path)
-        if image is None: # this is a prompt image so use prompt dir path
-            image_path = os.path.join(prompt_images_path, image_file)
-            image = cv2.imread(image_path)
-        video_writer.write(image)
-    
-    video_writer.release()
-    print(f"Video saved at {output_video_path}")
+    try:
+        # Execute FFmpeg command
+        subprocess.run(ffmpeg_cmd, check=True)
+        print(f"Video saved at {output_video_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error creating video: {e}")
+    finally:
+        # Clean up temporary file
+        if os.path.exists('temp_file_list.txt'):
+            os.remove('temp_file_list.txt')
 
 create_video_from_images(SAVE_TRACKING_RESULTS_DIR, prompt_images_path, OUTPUT_VIDEO_PATH, fps)
