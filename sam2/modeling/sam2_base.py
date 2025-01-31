@@ -360,7 +360,7 @@ class SAM2Base(torch.nn.Module):
             high_res_features=high_res_features,
         )
         if self.pred_obj_scores:
-            is_obj_appearing = (object_score_logits > 0) + use_mask_as_indication_of_obj
+            is_obj_appearing = (object_score_logits > 0) #+ use_mask_as_indication_of_obj
 
             # Mask used for spatial memories is always a *hard* choice between obj and no obj,
             # consistent with the actual mask prediction
@@ -592,7 +592,7 @@ class SAM2Base(torch.nn.Module):
                     # NOTE Nidhish: Perhaps we shouldn't do this. Maybe this results in false positives at the start of the video? 
                     # Our conditioning frames would not have any temporal relation with inferred frames.
                     # Hence commenting on Jan 24 19:15. Evaluate if results get better.
-                    out = None # unselected_cond_outputs.get(prev_frame_idx, None)
+                    out = unselected_cond_outputs.get(prev_frame_idx, None) # uncommented to restore to default state. dont know the answer yet.
                 t_pos_and_prevs.append((t_pos, out))
 
             for t_pos, prev in t_pos_and_prevs:
@@ -629,16 +629,16 @@ class SAM2Base(torch.nn.Module):
                     # Temporal pos encoding contains how far away each pointer is from current frame
                     (
                         # NOTE Nidhish: Made `t` a constant here to avoid biasing towards any prompted frame.
-                        # (
-                        #     (frame_idx - t) * tpos_sign_mul
-                        #     if self.use_signed_tpos_enc_to_obj_ptrs
-                        #     else abs(frame_idx - t)
-                        # ),
                         (
-                            (frame_idx - 0) * tpos_sign_mul
+                            (frame_idx - t) * tpos_sign_mul
                             if self.use_signed_tpos_enc_to_obj_ptrs
-                            else abs(frame_idx - 0)
+                            else abs(frame_idx - t)
                         ),
+                        # (
+                        #     (frame_idx - 0) * tpos_sign_mul
+                        #     if self.use_signed_tpos_enc_to_obj_ptrs
+                        #     else abs(frame_idx - 0)
+                        # ),
                         out["obj_ptr"],
                     )
                     for t, out in ptr_cond_outputs.items()
@@ -660,7 +660,7 @@ class SAM2Base(torch.nn.Module):
                     obj_ptrs = torch.stack(ptrs_list, dim=0)
                     # a temporal positional embedding based on how far each object pointer is from
                     # the current frame (sine embedding normalized by the max pointer num).
-                    if self.add_tpos_enc_to_obj_ptrs:
+                    if self.add_tpos_enc_to_obj_ptrs #and False: # to simulate False
                         t_diff_max = max_obj_ptrs_in_encoder - 1
                         tpos_dim = C if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
                         obj_pos = torch.tensor(pos_list).to(
