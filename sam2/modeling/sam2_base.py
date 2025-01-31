@@ -660,7 +660,7 @@ class SAM2Base(torch.nn.Module):
                     obj_ptrs = torch.stack(ptrs_list, dim=0)
                     # a temporal positional embedding based on how far each object pointer is from
                     # the current frame (sine embedding normalized by the max pointer num).
-                    if self.add_tpos_enc_to_obj_ptrs #and False: # to simulate False
+                    if self.add_tpos_enc_to_obj_ptrs: #and False: # to simulate False
                         t_diff_max = max_obj_ptrs_in_encoder - 1
                         tpos_dim = C if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
                         obj_pos = torch.tensor(pos_list).to(

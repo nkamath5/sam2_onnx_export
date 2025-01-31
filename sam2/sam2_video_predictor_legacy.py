@@ -1083,9 +1083,10 @@ class SAM2VideoPredictor(SAM2Base):
             # possibly due to an assumption that each frame has all object masks.
             # out_maskmem_pos_enc[0].size(0) gives us 1, but self._get_obj_num() gives us 10)
             # this was causing a concat error later downstream when using more than one objects to segment.
+            # Maybe not. testing. I had commented the repeat here while trt conv return self.cache[cache_key].to(device)[None].repeat(B, 1, 1, 1) # B=1 in position_encoding.py
             
-            # batch_size = out_maskmem_pos_enc[0].size(0)
-            batch_size = self._get_obj_num(inference_state)
+            batch_size = out_maskmem_pos_enc[0].size(0)
+            # batch_size = self._get_obj_num(inference_state)
             
             expanded_maskmem_pos_enc = [
                 x.expand(batch_size, -1, -1, -1) for x in maskmem_pos_enc

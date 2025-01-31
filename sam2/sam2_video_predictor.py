@@ -481,7 +481,7 @@ class SAM2VideoPredictor(SAM2Base):
 
         return consolidated_out
 
-    # @torch.inference_mode()
+    @torch.inference_mode() # had commented it out when trying onnx first time may not be necessary to comment
     def propagate_in_video_preflight(self, inference_state):
         """Prepare inference_state and consolidate temporary outputs before tracking."""
         # Check and make sure that every object has received input points or masks.
@@ -547,7 +547,7 @@ class SAM2VideoPredictor(SAM2Base):
             for frame_idx in obj_output_dict["cond_frame_outputs"]:
                 obj_output_dict["non_cond_frame_outputs"].pop(frame_idx, None)
 
-    # @torch.inference_mode()
+    @torch.inference_mode() # had commented it out when trying onnx first time may not be necessary to comment
     def propagate_in_video(
         self,
         inference_state,
@@ -632,8 +632,8 @@ class SAM2VideoPredictor(SAM2Base):
             _, video_res_masks = self._get_orig_video_res_output(
                 inference_state, all_pred_masks
             )
-            #yield frame_idx, obj_ids, video_res_masks
-            return frame_idx, obj_ids, video_res_masks
+            yield frame_idx, obj_ids, video_res_masks
+            # return frame_idx, obj_ids, video_res_masks
 
     @torch.inference_mode()
     def clear_all_prompts_in_frame(
@@ -718,7 +718,8 @@ class SAM2VideoPredictor(SAM2Base):
             device = inference_state["device"]
             # with torch.inference_mode(False):
             # breakpoint()
-            image = inference_state["images"].clone()[frame_idx].to(device).float().unsqueeze(0)
+            image = inference_state["images"][frame_idx].to(device).float().unsqueeze(0)
+            # image = inference_state["images"].clone()[frame_idx].to(device).float().unsqueeze(0) # had put the clone here for onnx conversion
             # image_t = inference_state["images"][frame_idx]
             # image = torch.clone(image_t).to(device).float().unsqueeze(0)
             backbone_out = self.forward_image(image)
